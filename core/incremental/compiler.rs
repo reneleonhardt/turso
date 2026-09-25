@@ -1844,19 +1844,32 @@ impl DbspCompiler {
                 })
             }
             LogicalExpr::Like {
-                expr,
+                exprs,
                 pattern,
                 escape,
+                op,
                 negated,
             } => {
-                let lhs = Box::new(Self::logical_to_ast_expr_with_schema(expr, schema)?);
+                let mut lhs_exprs = exprs
+                    .iter()
+                    .map(|expr| Self::logical_to_ast_expr_with_schema(expr, schema))
+                    .collect::<Result<Vec<_>>>()?;
+                let lhs = if *op == ast::LikeOperator::Match {
+                    ast::Expr::Parenthesized(lhs_exprs.into_iter().map(Box::new).collect())
+                } else if lhs_exprs.len() == 1 {
+                    lhs_exprs.remove(0)
+                } else {
+                    return Err(LimboError::ParseError(
+                        "non-MATCH pattern operators require one left expression".to_string(),
+                    ));
+                };
                 let rhs = Box::new(Self::logical_to_ast_expr_with_schema(pattern, schema)?);
                 let escape_expr = escape
                     .map(|c| Box::new(ast::Expr::Literal(ast::Literal::String(c.to_string()))));
                 Ok(ast::Expr::Like {
-                    lhs,
+                    lhs: Box::new(lhs),
                     not: *negated,
-                    op: ast::LikeOperator::Like,
+                    op: *op,
                     rhs,
                     escape: escape_expr,
                 })
@@ -5831,6 +5844,40 @@ mod tests {
             .iter()
             .find(|(row, _)| row.values[0] == Value::from_i64(2));
         assert!(bob.is_none(), "Bob should be filtered out");
+    }
+
+    #[test]
+    #[cfg(all(feature = "fts", not(target_family = "wasm")))]
+    fn test_not_match_multi_column_filter_in_incremental_view() {
+        let (mut circuit, pager) =
+            compile_sql!("SELECT * FROM users WHERE (name, age) NOT MATCH '30'");
+
+        let mut input_delta = Delta::new();
+        input_delta.insert(
+            1,
+            vec![
+                Value::from_i64(1),
+                Value::Text("Bob".into()),
+                Value::from_i64(30),
+            ],
+        );
+        input_delta.insert(
+            2,
+            vec![
+                Value::from_i64(2),
+                Value::Text("Alice".into()),
+                Value::from_i64(20),
+            ],
+        );
+
+        let mut inputs = HashMap::default();
+        inputs.insert("users".to_string(), input_delta);
+
+        let result = test_execute(&mut circuit, inputs, pager).unwrap();
+
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].0.values[0], Value::from_i64(2));
+        assert_eq!(result.changes[0].0.values[1], Value::Text("Alice".into()));
     }
 
     fn make_column_info(name: &str, ty: Type, table: &str) -> ColumnInfo {

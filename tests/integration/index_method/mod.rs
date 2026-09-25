@@ -3330,6 +3330,15 @@ fn test_fts_column_order_agnostic(tmp_db: TempDatabase) {
         .column(0)
         .contains_exactly_in_any_order([Cell::from(1), Cell::from(3)]);
 
+    let rows_not_matching = limbo_exec_rows(
+        &conn,
+        "SELECT id FROM articles WHERE (title, body) NOT MATCH 'database'",
+    );
+    assert_that!(rows_not_matching)
+        .named("ids that do not match the query")
+        .column(0)
+        .contains_exactly_in_any_order([Cell::from(2)]);
+
     // Test fts_score with reversed column order
     let rows_score_reversed = limbo_exec_rows(
         &conn,

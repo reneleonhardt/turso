@@ -325,7 +325,7 @@ Feature support of [sqlite expr syntax](https://www.sqlite.org/lang_expr.html).
 | (NOT) LIKE                | ✅ Yes     |                                          |
 | (NOT) GLOB                | ✅ Yes     |                                          |
 | (NOT) REGEXP              | ✅ Yes     |                                          |
-| (NOT) MATCH               | ❌ No      |                                          |
+| (NOT) MATCH               | ✅ Yes     |                                          |
 | IS (NOT)                  | ✅ Yes     |                                          |
 | IS (NOT) DISTINCT FROM    | ✅ Yes     |                                          |
 | (NOT) BETWEEN ... AND ... | ✅ Yes     | Expression is rewritten in the optimizer |

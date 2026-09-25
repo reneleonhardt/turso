@@ -343,11 +343,12 @@ pub enum LogicalExpr {
         high: Box<LogicalExpr>,
         negated: bool,
     },
-    /// LIKE pattern matching
+    /// Text pattern matching
     Like {
-        expr: Box<LogicalExpr>,
+        exprs: Vec<LogicalExpr>,
         pattern: Box<LogicalExpr>,
         escape: Option<char>,
+        op: ast::LikeOperator,
         negated: bool,
     },
     /// CAST expression
@@ -1855,11 +1856,22 @@ impl<'a> LogicalPlanBuilder<'a> {
             ast::Expr::Like {
                 lhs,
                 not,
-                op: _,
+                op,
                 rhs,
                 escape,
             } => {
-                let expr = Box::new(self.build_expr(lhs, _schema)?);
+                let exprs = if *op == ast::LikeOperator::Match {
+                    if let ast::Expr::Parenthesized(columns) = lhs.as_ref() {
+                        columns
+                            .iter()
+                            .map(|column| self.build_expr(column, _schema))
+                            .collect::<Result<Vec<_>>>()?
+                    } else {
+                        vec![self.build_expr(lhs, _schema)?]
+                    }
+                } else {
+                    vec![self.build_expr(lhs, _schema)?]
+                };
                 let pattern = Box::new(self.build_expr(rhs, _schema)?);
                 let escape_char = escape.as_ref().and_then(|e| {
                     if let ast::Expr::Literal(ast::Literal::String(s)) = e.as_ref() {
@@ -1869,9 +1881,10 @@ impl<'a> LogicalPlanBuilder<'a> {
                     }
                 });
                 Ok(LogicalExpr::Like {
-                    expr,
+                    exprs,
                     pattern,
                     escape: escape_char,
+                    op: *op,
                     negated: *not,
                 })
             }

@@ -11,8 +11,9 @@ path = "lib.rs"
 
 [dependencies]
 hex = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-turso_core = { workspace = true, features = ["simulator"] }
+turso_core = { workspace = true, features = ["simulator", "fts"] }
 turso_parser = { workspace = true, features = ["serde", "simulator"] }
 rand = { workspace = true }
 anarchist-readable-name-generator-lib = "0.2.0"

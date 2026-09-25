@@ -1,5 +1,6 @@
 use std::{fmt::Display, hash::Hash, ops::Deref};
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use turso_core::alloc::{TursoIteratorExt, TursoSliceExt, ALLOC_ERR_MSG};
 use turso_core::{numeric::Numeric, types, LimboError};
@@ -323,26 +324,34 @@ impl SimValue {
         }
     }
 
-    // TODO: support more operators. Copy the implementation for exec_glob
     pub fn like_compare(
         &self,
         other: &Self,
         operator: ast::LikeOperator,
-    ) -> Result<bool, LimboError> {
-        match operator {
-            ast::LikeOperator::Glob => todo!(),
-            ast::LikeOperator::Like => {
-                // TODO: support ESCAPE `expr` option in AST
-                // TODO: regex cache
-                types::Value::exec_like(
-                    other.0.to_string().as_str(),
-                    self.0.to_string().as_str(),
-                    None,
-                )
-            }
-            ast::LikeOperator::Match => todo!(),
-            ast::LikeOperator::Regexp => todo!(),
+    ) -> Result<Option<bool>, LimboError> {
+        if matches!(self.0, types::Value::Null) || matches!(other.0, types::Value::Null) {
+            return Ok(None);
         }
+
+        let pattern = other.0.exec_cast("TEXT")?;
+        let text = self.0.exec_cast("TEXT")?;
+        let (types::Value::Text(pattern), types::Value::Text(text)) = (&pattern, &text) else {
+            unreachable!("casting values to TEXT must produce text");
+        };
+        let pattern = pattern.as_str();
+        let text = text.as_str();
+
+        let matches = match operator {
+            ast::LikeOperator::Glob => types::Value::exec_glob(pattern, text)?,
+            ast::LikeOperator::Like => types::Value::exec_like(pattern, text, None)?,
+            ast::LikeOperator::Match => turso_core::index_method::fts::fts_match(text, pattern),
+            ast::LikeOperator::Regexp => match Regex::new(pattern) {
+                Ok(regex) => regex.is_match(text),
+                Err(_) => return Ok(None),
+            },
+        };
+
+        Ok(Some(matches))
     }
 
     pub fn unary_exec(&self, operator: ast::UnaryOperator) -> SimValue {

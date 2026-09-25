@@ -145,7 +145,10 @@ pub fn expr_to_value<T: TableContext>(
             let lhs = expr_to_value(lhs, row, table)?;
             let rhs = expr_to_value(rhs, row, table)?;
             let res = lhs.like_compare(&rhs, *op).ok()?;
-            let value: SimValue = if *not { !res } else { res }.into();
+            let value = match res {
+                Some(res) => (if *not { !res } else { res }).into(),
+                None => SimValue::NULL,
+            };
             Some(value)
         }
         ast::Expr::Unary(op, expr) => {
@@ -163,5 +166,67 @@ pub fn expr_to_value<T: TableContext>(
 impl Display for Predicate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.displayer(&BlankContext).fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use turso_core::types;
+    use turso_parser::ast::{self, LikeOperator};
+
+    use crate::model::table::{Column, ColumnType, SimValue, Table};
+
+    use super::Predicate;
+
+    fn table(value: SimValue) -> (Table, Vec<SimValue>) {
+        (
+            Table {
+                name: "items".to_string(),
+                columns: vec![Column {
+                    name: "value".to_string(),
+                    column_type: ColumnType::Text,
+                    constraints: vec![],
+                }],
+                rows: vec![],
+                indexes: vec![],
+            },
+            vec![value],
+        )
+    }
+
+    fn pattern_predicate(op: LikeOperator, pattern: &str, not: bool) -> Predicate {
+        Predicate(ast::Expr::Like {
+            lhs: Box::new(ast::Expr::Id(ast::Name::exact("value".to_string()))),
+            not,
+            op,
+            rhs: Box::new(ast::Expr::Literal(ast::Literal::String(format!(
+                "'{}'",
+                pattern.replace('\'', "''")
+            )))),
+            escape: None,
+        })
+    }
+
+    #[test]
+    fn pattern_operators_match_and_preserve_nulls() {
+        let (model, row) = table(SimValue(types::Value::Text("Hello, world".into())));
+
+        assert!(pattern_predicate(LikeOperator::Like, "Hello%", false).test(&row, &model));
+        assert!(pattern_predicate(LikeOperator::Glob, "Hello*", false).test(&row, &model));
+        assert!(
+            pattern_predicate(LikeOperator::Regexp, "^Hello.*world$", false).test(&row, &model)
+        );
+        assert!(pattern_predicate(LikeOperator::Match, "world", false).test(&row, &model));
+        assert!(!pattern_predicate(LikeOperator::Glob, "Hello*", true).test(&row, &model));
+        assert_eq!(
+            pattern_predicate(LikeOperator::Regexp, "[", false).eval(&row, &model),
+            Some(SimValue::NULL)
+        );
+
+        let (model, row) = table(SimValue::NULL);
+        assert_eq!(
+            pattern_predicate(LikeOperator::Match, "world", true).eval(&row, &model),
+            Some(SimValue::NULL)
+        );
     }
 }
