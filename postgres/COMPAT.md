@@ -186,7 +186,7 @@ INTEGER. Unknown type names pass through as custom types.
 | ORDER BY NULLS FIRST/LAST | ✅ Supported | Honored in SELECT, window, and compound SELECT ORDER BY; rejected (matching SQLite) in CREATE INDEX |
 | range_agg range type aggregation function | ❌ Not supported | |
 | Recursive queries | 🟡 Partial | WITH RECURSIVE works with SQLite semantics (row-at-a-time recursive term, so e.g. DISTINCT in the recursive term over a multi-row anchor can differ from PG); SEARCH/CYCLE clauses are rejected |
-| regexp_count, regexp_instr, regexp_like | 🟡 Partial | `regexp_like` supports common PostgreSQL flags; `regexp_count` and `regexp_instr` remain unsupported. |
+| regexp_count, regexp_instr, regexp_like | 🟡 Partial | Supports common PostgreSQL flags; PostgreSQL POSIX regex syntax remains incomplete. |
 | Return OLD and NEW values from modified rows | ❌ Not supported | |
 | Row-wise comparison | ❌ Not supported | Row constructors `(a,b) < (c,d)` fail to translate |
 | SELECT ... FOR UPDATE/SHARE | ❌ Not supported | Accepted but silently ignored — no locking happens |

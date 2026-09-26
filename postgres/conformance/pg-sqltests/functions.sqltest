@@ -236,6 +236,19 @@ expect {
     1
 }
 
+test regexp-count-instr-like {
+    SELECT regexp_count('aababa', 'a'),
+           regexp_count('aababa', 'a', 3),
+           regexp_count('AAaa', 'a', 1, 'i'),
+           regexp_instr('éaéa', 'a', 1, 2, 0),
+           regexp_instr('éaéa', 'a', 1, 2, 1),
+           regexp_instr('abc123', '([a-z]+)([0-9]+)', 1, 1, 0, '', 2),
+           regexp_like('Postgres', '^postgres$', 'i');
+}
+expect {
+    4|2|4|4|5|4|1
+}
+
 test regexp-operators-default-to-postgres-newline-matching {
     SELECT ('a' || chr(10) || 'b') ~ 'a.b',
            ('a' || chr(10) || 'b') !~ 'a.b',

@@ -10,6 +10,8 @@ pub fn register_extension(ext_api: &mut ExtensionApi) {
             c"pg_similar_to_regex".as_ptr(),
             pg_similar_to_regex,
         );
+        register_scalar_function(ext_api.ctx, c"regexp_count".as_ptr(), regexp_count);
+        register_scalar_function(ext_api.ctx, c"regexp_instr".as_ptr(), regexp_instr);
     }
 }
 
@@ -148,6 +150,128 @@ fn convert_similar_pattern(pattern: &str, escape: Option<char>) -> String {
     regex
 }
 
+#[scalar(name = "regexp_count")]
+fn regexp_count(args: &[Value]) -> Value {
+    if !(2..=4).contains(&args.len()) {
+        return Value::error_with_message("regexp_count() expects two to four arguments".into());
+    }
+    if args.iter().any(|arg| arg.value_type() == ValueType::Null) {
+        return Value::null();
+    }
+    let (Some(source), Some(pattern)) = (args[0].to_text_coerced(), args[1].to_text_coerced())
+    else {
+        return Value::null();
+    };
+    let start = match args.get(2) {
+        Some(value) => match value.to_integer() {
+            Some(start) if start > 0 => start,
+            Some(_) => {
+                return Value::error_with_message(
+                    "regexp_count() start must be greater than zero".into(),
+                )
+            }
+            None => {
+                return Value::error_with_message("regexp_count() start must be an integer".into())
+            }
+        },
+        None => 1,
+    };
+    let flags = match args.get(3).map(Value::to_text_coerced) {
+        Some(Some(flags)) => Some(flags),
+        Some(None) => return Value::null(),
+        None => None,
+    };
+    let regex = match cached_regex(&pattern, flags.as_deref(), RegexMode::Postgres) {
+        Ok(regex) => regex,
+        Err(error) => return Value::error_with_message(error.into()),
+    };
+    let Some(start_byte) = byte_offset_for_character(&source, start) else {
+        return Value::from_integer(0);
+    };
+    let count = regex
+        .find_iter(&source)
+        .filter(|found| found.start() >= start_byte)
+        .count();
+    Value::from_integer(i64::try_from(count).unwrap_or(i64::MAX))
+}
+
+#[scalar(name = "regexp_instr")]
+fn regexp_instr(args: &[Value]) -> Value {
+    if !(2..=7).contains(&args.len()) {
+        return Value::error_with_message("regexp_instr() expects two to seven arguments".into());
+    }
+    if args.iter().any(|arg| arg.value_type() == ValueType::Null) {
+        return Value::null();
+    }
+    let (Some(source), Some(pattern)) = (args[0].to_text_coerced(), args[1].to_text_coerced())
+    else {
+        return Value::null();
+    };
+    let start = match positive_integer_arg(args, 2, 1, "start") {
+        Ok(start) => start,
+        Err(error) => return error,
+    };
+    let nth = match positive_integer_arg(args, 3, 1, "n") {
+        Ok(nth) => nth,
+        Err(error) => return error,
+    };
+    let end_option = match integer_arg(args, 4, 0, "endoption") {
+        Ok(option @ (0 | 1)) => option,
+        Ok(option) => {
+            return Value::error_with_message(
+                format!("regexp_instr() endoption must be 0 or 1, got {option}").into(),
+            )
+        }
+        Err(error) => return error,
+    };
+    let flags = match args.get(5).map(Value::to_text_coerced) {
+        Some(Some(flags)) => Some(flags),
+        Some(None) => return Value::null(),
+        None => None,
+    };
+    let subexpression = match integer_arg(args, 6, 0, "subexpression") {
+        Ok(subexpression) if subexpression >= 0 => subexpression,
+        Ok(_) => {
+            return Value::error_with_message(
+                "regexp_instr() subexpression must not be negative".into(),
+            )
+        }
+        Err(error) => return error,
+    };
+    let regex = match cached_regex(&pattern, flags.as_deref(), RegexMode::Postgres) {
+        Ok(regex) => regex,
+        Err(error) => return Value::error_with_message(error.into()),
+    };
+    let Some(start_byte) = byte_offset_for_character(&source, start) else {
+        return Value::from_integer(0);
+    };
+    let Some(captures) = regex
+        .captures_iter(&source)
+        .filter(|captures| {
+            captures
+                .get(0)
+                .is_some_and(|found| found.start() >= start_byte)
+        })
+        .nth(usize::try_from(nth - 1).unwrap_or(usize::MAX))
+    else {
+        return Value::from_integer(0);
+    };
+    let Some(found) = usize::try_from(subexpression)
+        .ok()
+        .and_then(|index| captures.get(index))
+    else {
+        return Value::from_integer(0);
+    };
+    let byte_position = if end_option == 1 {
+        found.end()
+    } else {
+        found.start()
+    };
+    Value::from_integer(
+        i64::try_from(source[..byte_position].chars().count()).unwrap_or(i64::MAX) + 1,
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RegexMode {
     Sqlite,
@@ -245,6 +369,48 @@ fn compile_regex(pattern: &str, flags: Option<&str>) -> Result<regex::Regex, Str
         .map_err(|error| format!("invalid regular expression: {error}"))
 }
 
+fn byte_offset_for_character(source: &str, position: i64) -> Option<usize> {
+    if position <= 0 {
+        return None;
+    }
+    let character_index = usize::try_from(position - 1).ok()?;
+    let character_count = source.chars().count();
+    match character_index.cmp(&character_count) {
+        std::cmp::Ordering::Less => source
+            .char_indices()
+            .nth(character_index)
+            .map(|(byte, _)| byte),
+        std::cmp::Ordering::Equal => Some(source.len()),
+        std::cmp::Ordering::Greater => None,
+    }
+}
+
+fn integer_arg(args: &[Value], index: usize, default: i64, name: &str) -> Result<i64, Value> {
+    args.get(index)
+        .map(|value| {
+            value.to_integer().ok_or_else(|| {
+                Value::error_with_message(
+                    format!("regexp argument {name} must be an integer").into(),
+                )
+            })
+        })
+        .unwrap_or(Ok(default))
+}
+
+fn positive_integer_arg(
+    args: &[Value],
+    index: usize,
+    default: i64,
+    name: &str,
+) -> Result<i64, Value> {
+    match integer_arg(args, index, default, name)? {
+        value if value > 0 => Ok(value),
+        _ => Err(Value::error_with_message(
+            format!("regexp argument {name} must be greater than zero").into(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +427,14 @@ mod tests {
 
     fn call_similar_to_regex(args: &[Value]) -> Value {
         unsafe { pg_similar_to_regex(0, args.len() as i32, args.as_ptr(), None, None) }
+    }
+
+    fn call_count(args: &[Value]) -> Value {
+        unsafe { regexp_count(0, args.len() as i32, args.as_ptr(), None, None) }
+    }
+
+    fn call_instr(args: &[Value]) -> Value {
+        unsafe { regexp_instr(0, args.len() as i32, args.as_ptr(), None, None) }
     }
 
     fn text(s: &str) -> Value {
@@ -410,16 +584,103 @@ mod tests {
             call_like(&[text("a b"), text("a b"), text("t")]).to_integer(),
             Some(1)
         );
+        assert_eq!(
+            call_count(&[text("a\nb"), text("a.b")]).to_integer(),
+            Some(1)
+        );
+        assert_eq!(
+            call_count(&[text("a\nb"), text("a.b"), Value::from_integer(1), text("n")])
+                .to_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            call_instr(&[
+                text("a\nb"),
+                text("a.b"),
+                Value::from_integer(1),
+                Value::from_integer(1),
+                Value::from_integer(0),
+                text("n")
+            ])
+            .to_integer(),
+            Some(0)
+        );
     }
 
     #[test]
-    fn regexp_like_rejects_invalid_patterns_and_flags() {
+    fn regexp_count_supports_start_and_unicode_positions() {
+        assert_eq!(call_count(&[text("éaéa"), text("a")]).to_integer(), Some(2));
+        assert_eq!(
+            call_count(&[text("éaéa"), text("a"), Value::from_integer(3)]).to_integer(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn regexp_instr_supports_occurrence_end_and_capture() {
+        assert_eq!(
+            call_instr(&[
+                text("éaéa"),
+                text("a"),
+                Value::from_integer(1),
+                Value::from_integer(2)
+            ])
+            .to_integer(),
+            Some(4)
+        );
+        assert_eq!(
+            call_instr(&[
+                text("éaéa"),
+                text("a"),
+                Value::from_integer(1),
+                Value::from_integer(2),
+                Value::from_integer(1),
+            ])
+            .to_integer(),
+            Some(5)
+        );
+        assert_eq!(
+            call_instr(&[
+                text("abc123"),
+                text("([a-z]+)([0-9]+)"),
+                Value::from_integer(1),
+                Value::from_integer(1),
+                Value::from_integer(0),
+                text(""),
+                Value::from_integer(2),
+            ])
+            .to_integer(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn regexp_helpers_reject_invalid_options_and_positions() {
         assert!(call_like(&[text("abc"), text("(")])
             .to_error_details()
             .is_some());
         assert!(call_like(&[text("abc"), text("a"), text("g")])
             .to_error_details()
             .is_some());
+        assert!(
+            call_count(&[text("abc"), text("a"), Value::from_integer(0)])
+                .to_error_details()
+                .is_some()
+        );
+        assert!(
+            call_instr(&[text("abc"), text("a"), Value::from_integer(0)])
+                .to_error_details()
+                .is_some()
+        );
+        assert!(call_instr(&[
+            text("abc"),
+            text("a"),
+            Value::from_integer(1),
+            Value::from_integer(1),
+            Value::from_integer(2),
+        ])
+        .to_error_details()
+        .is_some());
         assert_eq!(
             call_like(&[Value::null(), text("a")]).value_type(),
             ValueType::Null
