@@ -56,7 +56,7 @@ fn regexp_like(args: &[Value]) -> Value {
     };
     match cached_regex(&pattern, flags.as_deref(), RegexMode::Postgres) {
         Ok(regex) => Value::from_integer(regex.is_match(&source) as i64),
-        Err(error) => Value::error_with_message(error.into()),
+        Err(error) => Value::error_with_message(error),
     }
 }
 
@@ -183,7 +183,7 @@ fn regexp_count(args: &[Value]) -> Value {
     };
     let regex = match cached_regex(&pattern, flags.as_deref(), RegexMode::Postgres) {
         Ok(regex) => regex,
-        Err(error) => return Value::error_with_message(error.into()),
+        Err(error) => return Value::error_with_message(error),
     };
     let Some(start_byte) = byte_offset_for_character(&source, start) else {
         return Value::from_integer(0);
@@ -218,9 +218,9 @@ fn regexp_instr(args: &[Value]) -> Value {
     let end_option = match integer_arg(args, 4, 0, "endoption") {
         Ok(option @ (0 | 1)) => option,
         Ok(option) => {
-            return Value::error_with_message(
-                format!("regexp_instr() endoption must be 0 or 1, got {option}").into(),
-            )
+            return Value::error_with_message(format!(
+                "regexp_instr() endoption must be 0 or 1, got {option}"
+            ))
         }
         Err(error) => return error,
     };
@@ -240,7 +240,7 @@ fn regexp_instr(args: &[Value]) -> Value {
     };
     let regex = match cached_regex(&pattern, flags.as_deref(), RegexMode::Postgres) {
         Ok(regex) => regex,
-        Err(error) => return Value::error_with_message(error.into()),
+        Err(error) => return Value::error_with_message(error),
     };
     let Some(start_byte) = byte_offset_for_character(&source, start) else {
         return Value::from_integer(0);
@@ -389,9 +389,7 @@ fn integer_arg(args: &[Value], index: usize, default: i64, name: &str) -> Result
     args.get(index)
         .map(|value| {
             value.to_integer().ok_or_else(|| {
-                Value::error_with_message(
-                    format!("regexp argument {name} must be an integer").into(),
-                )
+                Value::error_with_message(format!("regexp argument {name} must be an integer"))
             })
         })
         .unwrap_or(Ok(default))
@@ -405,9 +403,9 @@ fn positive_integer_arg(
 ) -> Result<i64, Value> {
     match integer_arg(args, index, default, name)? {
         value if value > 0 => Ok(value),
-        _ => Err(Value::error_with_message(
-            format!("regexp argument {name} must be greater than zero").into(),
-        )),
+        _ => Err(Value::error_with_message(format!(
+            "regexp argument {name} must be greater than zero"
+        ))),
     }
 }
 

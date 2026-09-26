@@ -4026,6 +4026,7 @@ impl PostgreSQLTranslator {
     }
 }
 
+#[expect(clippy::vec_box, reason = "FunctionCall stores boxed expressions")]
 fn pattern_function_call(name: &str, args: Vec<Box<ast::Expr>>) -> ast::Expr {
     ast::Expr::FunctionCall {
         name: ast::Name::from_string(name),
