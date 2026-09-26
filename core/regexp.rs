@@ -27,7 +27,7 @@ fn regexp(args: &[Value]) -> Value {
         return Value::null();
     };
 
-    let re = match regex::Regex::new(&pattern) {
+    let re = match cached_regex(&pattern, None, RegexMode::Sqlite) {
         Ok(re) => re,
         Err(_) => return Value::null(),
     };
@@ -52,7 +52,7 @@ fn regexp_like(args: &[Value]) -> Value {
         Some(None) => return Value::null(),
         None => None,
     };
-    match compile_regex(&pattern, flags.as_deref()) {
+    match cached_regex(&pattern, flags.as_deref(), RegexMode::Postgres) {
         Ok(regex) => Value::from_integer(regex.is_match(&source) as i64),
         Err(error) => Value::error_with_message(error.into()),
     }
@@ -146,6 +146,55 @@ fn convert_similar_pattern(pattern: &str, escape: Option<char>) -> String {
     }
     regex.push_str(")$");
     regex
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegexMode {
+    Sqlite,
+    Postgres,
+}
+
+struct RegexCacheEntry {
+    pattern: String,
+    flags: Option<String>,
+    mode: RegexMode,
+    compiled: Result<std::rc::Rc<regex::Regex>, String>,
+}
+
+std::thread_local! {
+    static REGEX_CACHE: std::cell::RefCell<Vec<RegexCacheEntry>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn cached_regex(
+    pattern: &str,
+    flags: Option<&str>,
+    mode: RegexMode,
+) -> Result<std::rc::Rc<regex::Regex>, String> {
+    REGEX_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(index) = cache.iter().position(|entry| {
+            entry.pattern == pattern && entry.flags.as_deref() == flags && entry.mode == mode
+        }) {
+            let entry = cache.remove(index);
+            cache.push(entry);
+        } else {
+            let compiled = match mode {
+                RegexMode::Sqlite => regex::Regex::new(pattern).map_err(|error| error.to_string()),
+                RegexMode::Postgres => compile_regex(pattern, flags),
+            }
+            .map(std::rc::Rc::new);
+            if cache.len() == 4 {
+                cache.remove(0);
+            }
+            cache.push(RegexCacheEntry {
+                pattern: pattern.to_owned(),
+                flags: flags.map(str::to_owned),
+                mode,
+                compiled,
+            });
+        }
+        cache.last().unwrap().compiled.clone()
+    })
 }
 
 fn compile_regex(pattern: &str, flags: Option<&str>) -> Result<regex::Regex, String> {
@@ -244,6 +293,24 @@ mod tests {
             call(&[text("("), text("abc")]).value_type(),
             ValueType::Null
         );
+    }
+
+    #[test]
+    fn regex_cache_reuses_patterns_and_keeps_modes_and_flags_separate() {
+        let sqlite = cached_regex("a.b", None, RegexMode::Sqlite).unwrap();
+        let repeated = cached_regex("a.b", None, RegexMode::Sqlite).unwrap();
+        assert!(std::rc::Rc::ptr_eq(&sqlite, &repeated));
+
+        let postgres = cached_regex("a.b", None, RegexMode::Postgres).unwrap();
+        assert!(!std::rc::Rc::ptr_eq(&sqlite, &postgres));
+        assert!(!sqlite.is_match("a\nb"));
+        assert!(postgres.is_match("a\nb"));
+
+        let no_newline = cached_regex("a.b", Some("n"), RegexMode::Postgres).unwrap();
+        assert!(!std::rc::Rc::ptr_eq(&postgres, &no_newline));
+        assert!(!no_newline.is_match("a\nb"));
+        assert!(cached_regex("(", None, RegexMode::Sqlite).is_err());
+        assert!(cached_regex("(", None, RegexMode::Sqlite).is_err());
     }
 
     #[test]
