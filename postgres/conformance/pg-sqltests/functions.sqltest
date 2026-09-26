@@ -228,3 +228,38 @@ test mode-within-group {
 expect {
     1
 }
+
+test regexp-like-case-insensitive {
+    SELECT regexp_like('Postgres', '^postgres$', 'i');
+}
+expect {
+    1
+}
+
+test regexp-operators-default-to-postgres-newline-matching {
+    SELECT ('a' || chr(10) || 'b') ~ 'a.b',
+           ('a' || chr(10) || 'b') !~ 'a.b',
+           ('a' || chr(10) || 'b') ~* 'A.B',
+           ('a' || chr(10) || 'b') !~* 'A.B';
+}
+expect {
+    1|0|1|0
+}
+
+test like-escape-is-preserved {
+    SELECT 'a%b' LIKE 'a!%b' ESCAPE '!',
+           'A!b' ILIKE 'a!!b' ESCAPE '!';
+}
+expect {
+    1|1
+}
+
+test similar-to-matches-full-pattern-and-preserves-escape {
+    SELECT 'abc' SIMILAR TO ('a' || '%'),
+           'xabc' SIMILAR TO 'abc',
+           'a%b' SIMILAR TO 'a!%b' ESCAPE '!',
+           'a!xxb' SIMILAR TO 'a!%b' ESCAPE '';
+}
+expect {
+    1|0|1|1
+}

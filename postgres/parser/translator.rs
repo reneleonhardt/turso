@@ -2595,8 +2595,6 @@ impl PostgreSQLTranslator {
                 })
             }
             AExprKind::AexprSimilar => {
-                // SIMILAR TO → convert pattern to regex and use REGEXP
-                // pg_query wraps the rhs in similar_to_escape(pattern[, escape_char])
                 let op_name = a_expr
                     .name
                     .first()
@@ -2618,36 +2616,43 @@ impl PostgreSQLTranslator {
                     .rexpr
                     .as_ref()
                     .ok_or_else(|| ParseError::ParseError("SIMILAR TO: missing rhs".into()))?;
-
-                let pattern_node = match &rhs_node.node {
-                    Some(pg_query::protobuf::node::Node::FuncCall(fc)) => {
-                        // Extract the first argument (the pattern) from similar_to_escape()
-                        fc.args.first().unwrap_or(rhs_node)
+                let pattern_args = match &rhs_node.node {
+                    Some(pg_query::protobuf::node::Node::FuncCall(function))
+                        if function.funcname.last().is_some_and(|name| {
+                            matches!(
+                                name.node.as_ref(),
+                                Some(pg_query::protobuf::node::Node::String(name))
+                                    if name.sval == "similar_to_escape"
+                            )
+                        }) =>
+                    {
+                        if !(1..=2).contains(&function.args.len()) {
+                            return Err(ParseError::ParseError(
+                                "SIMILAR TO requires a pattern and optional escape character"
+                                    .into(),
+                            ));
+                        }
+                        function
+                            .args
+                            .iter()
+                            .map(|arg| Ok(Box::new(self.translate_expr(arg)?)))
+                            .collect::<Result<Vec<_>, ParseError>>()?
                     }
-                    _ => rhs_node,
+                    _ => vec![Box::new(self.translate_expr(rhs_node)?)],
                 };
-
-                let rhs_expr = self.translate_expr(pattern_node)?;
-                let regex_rhs = match rhs_expr {
-                    ast::Expr::Literal(ast::Literal::String(ref pat)) => {
-                        // String literals in our AST include surrounding quotes
-                        let unquoted = pat
-                            .strip_prefix('\'')
-                            .and_then(|s| s.strip_suffix('\''))
-                            .unwrap_or(pat);
-                        let regex = similar_to_regex(unquoted);
-                        // Re-wrap with quotes for the AST
-                        ast::Expr::Literal(ast::Literal::String(format!("'{regex}'")))
-                    }
-                    other => other,
-                };
-
-                Ok(ast::Expr::Like {
-                    lhs: Box::new(self.translate_expr(lhs)?),
-                    not,
-                    op: ast::LikeOperator::Regexp,
-                    rhs: Box::new(regex_rhs),
-                    escape: None,
+                let regex_rhs = pattern_function_call("pg_similar_to_regex", pattern_args);
+                let regex_call = pattern_function_call(
+                    "regexp_like",
+                    vec![
+                        Box::new(self.translate_expr(lhs)?),
+                        Box::new(regex_rhs),
+                        Box::new(ast::Expr::Literal(ast::Literal::String("'s'".into()))),
+                    ],
+                );
+                Ok(if not {
+                    ast::Expr::Unary(ast::UnaryOperator::Not, Box::new(regex_call))
+                } else {
+                    regex_call
                 })
             }
             _ => Err(ParseError::ParseError(format!(
@@ -2710,47 +2715,28 @@ impl PostgreSQLTranslator {
             ));
         };
 
-        // Handle regex operators (~, !~) which map to REGEXP expressions
-        match op_name {
-            "~" => {
-                return Ok(ast::Expr::Like {
-                    lhs: left,
-                    not: false,
-                    op: ast::LikeOperator::Regexp,
-                    rhs: right,
-                    escape: None,
-                });
-            }
-            "!~" => {
-                return Ok(ast::Expr::Like {
-                    lhs: left,
-                    not: true,
-                    op: ast::LikeOperator::Regexp,
-                    rhs: right,
-                    escape: None,
-                });
-            }
-            // Case-insensitive regex (~*, !~*) — treat same as case-sensitive
-            // since SQLite REGEXP is case-insensitive by default
-            "~*" => {
-                return Ok(ast::Expr::Like {
-                    lhs: left,
-                    not: false,
-                    op: ast::LikeOperator::Regexp,
-                    rhs: right,
-                    escape: None,
-                });
-            }
-            "!~*" => {
-                return Ok(ast::Expr::Like {
-                    lhs: left,
-                    not: true,
-                    op: ast::LikeOperator::Regexp,
-                    rhs: right,
-                    escape: None,
-                });
-            }
-            _ => {}
+        if let Some((flags, negate)) = match op_name {
+            "~" => Some(("s", false)),
+            "!~" => Some(("s", true)),
+            "~*" => Some(("si", false)),
+            "!~*" => Some(("si", true)),
+            _ => None,
+        } {
+            let regex_call = pattern_function_call(
+                "regexp_like",
+                vec![
+                    left,
+                    right,
+                    Box::new(ast::Expr::Literal(ast::Literal::String(format!(
+                        "'{flags}'"
+                    )))),
+                ],
+            );
+            return Ok(if negate {
+                ast::Expr::Unary(ast::UnaryOperator::Not, Box::new(regex_call))
+            } else {
+                regex_call
+            });
         }
 
         // Map PostgreSQL operators to Turso operators
@@ -2965,8 +2951,9 @@ impl PostgreSQLTranslator {
             ));
         };
 
-        let rhs = if let Some(rexpr) = &a_expr.rexpr {
-            Box::new(self.translate_expr(rexpr)?)
+        let (rhs, escape) = if let Some(rexpr) = &a_expr.rexpr {
+            let (rhs, escape) = self.translate_like_pattern(rexpr)?;
+            (Box::new(rhs), escape)
         } else {
             return Err(ParseError::ParseError(
                 "Missing right expression for LIKE operator".to_string(),
@@ -2978,7 +2965,7 @@ impl PostgreSQLTranslator {
             not,
             op: ast::LikeOperator::Like,
             rhs,
-            escape: None,
+            escape,
         })
     }
 
@@ -3014,8 +3001,8 @@ impl PostgreSQLTranslator {
             ));
         };
 
-        let rhs = if let Some(rexpr) = &a_expr.rexpr {
-            self.translate_expr(rexpr)?
+        let (rhs, escape) = if let Some(rexpr) = &a_expr.rexpr {
+            self.translate_like_pattern(rexpr)?
         } else {
             return Err(ParseError::ParseError(
                 "Missing right expression for ILIKE".to_string(),
@@ -3052,8 +3039,35 @@ impl PostgreSQLTranslator {
             not,
             op: ast::LikeOperator::Like,
             rhs: Box::new(lower_rhs),
-            escape: None,
+            escape,
         })
+    }
+
+    fn translate_like_pattern(
+        &self,
+        pattern: &pg_query::protobuf::Node,
+    ) -> Result<(ast::Expr, Option<Box<ast::Expr>>), ParseError> {
+        if let Some(pg_query::protobuf::node::Node::FuncCall(function)) = &pattern.node {
+            let name = function
+                .funcname
+                .last()
+                .and_then(|part| match part.node.as_ref() {
+                    Some(pg_query::protobuf::node::Node::String(name)) => Some(name.sval.as_str()),
+                    _ => None,
+                });
+            if name == Some("like_escape") {
+                if function.args.len() != 2 {
+                    return Err(ParseError::ParseError(
+                        "LIKE ESCAPE requires a pattern and escape character".into(),
+                    ));
+                }
+                return Ok((
+                    self.translate_expr(&function.args[0])?,
+                    Some(Box::new(self.translate_expr(&function.args[1])?)),
+                ));
+            }
+        }
+        Ok((self.translate_expr(pattern)?, None))
     }
 
     fn translate_between_expr(
@@ -4012,6 +4026,20 @@ impl PostgreSQLTranslator {
     }
 }
 
+fn pattern_function_call(name: &str, args: Vec<Box<ast::Expr>>) -> ast::Expr {
+    ast::Expr::FunctionCall {
+        name: ast::Name::from_string(name),
+        distinctness: None,
+        args,
+        order_by: vec![],
+        within_group: vec![],
+        filter_over: ast::FunctionTail {
+            filter_clause: None,
+            over_clause: None,
+        },
+    }
+}
+
 /// PostgreSQL derives a name for result columns without an explicit alias
 /// (FigureColname in the server): function calls are named after the function
 /// and SQL value functions after their keyword. Clients read columns by these
@@ -4915,31 +4943,6 @@ fn deparse_default_expr(node: &pg_query::protobuf::Node) -> Option<String> {
     }
 }
 
-/// Convert a SQL SIMILAR TO pattern to a POSIX regex anchored with ^...$
-/// `%` → `.*`, `_` → `.`, other regex metacharacters are kept as-is since
-/// SIMILAR TO patterns are already regex-like in SQL standard.
-fn similar_to_regex(pattern: &str) -> String {
-    let mut regex = String::with_capacity(pattern.len() + 2);
-    regex.push('^');
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '%' => regex.push_str(".*"),
-            '_' => regex.push('.'),
-            '\\' => {
-                // Escaped character: pass through literally
-                if let Some(next) = chars.next() {
-                    regex.push('\\');
-                    regex.push(next);
-                }
-            }
-            _ => regex.push(c),
-        }
-    }
-    regex.push('$');
-    regex
-}
-
 /// Converts a CamelCase identifier to UPPER CASE SQL keywords.
 /// e.g. "CreateExtension" → "CREATE EXTENSION", "AlterRole" → "ALTER ROLE"
 fn camel_to_sql(s: &str) -> String {
@@ -5652,6 +5655,63 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_like_and_ilike_preserve_escape_characters() {
+        for sql in [
+            "SELECT 1 WHERE 'a%b' LIKE 'a!%b' ESCAPE '!'",
+            "SELECT 1 WHERE 'A!b' ILIKE 'a!!b' ESCAPE '!'",
+        ] {
+            let expression = where_clause_of(sql);
+            let ast::Expr::Like { escape, .. } = expression else {
+                panic!("expected Like expression for {sql}");
+            };
+            let Some(escape) = escape else {
+                panic!("expected ESCAPE expression for {sql}");
+            };
+            assert!(matches!(
+                *escape,
+                ast::Expr::Literal(ast::Literal::String(ref value)) if value == "'!'"
+            ));
+        }
+    }
+
+    #[test]
+    fn test_similar_to_preserves_dynamic_patterns_escape_and_negation() {
+        for (sql, expected_args, negated) in [
+            ("SELECT 1 WHERE 'abc' SIMILAR TO ('a' || '%')", 1, false),
+            (
+                "SELECT 1 WHERE 'a%b' SIMILAR TO 'a!%b' ESCAPE '!'",
+                2,
+                false,
+            ),
+            ("SELECT 1 WHERE 'abc' NOT SIMILAR TO 'a_c'", 1, true),
+        ] {
+            let expression = where_clause_of(sql);
+            let expression = if negated {
+                let ast::Expr::Unary(ast::UnaryOperator::Not, expression) = expression else {
+                    panic!("expected NOT SIMILAR TO to negate the match for {sql}");
+                };
+                *expression
+            } else {
+                expression
+            };
+            let ast::Expr::FunctionCall { name, args, .. } = expression else {
+                panic!("expected regexp_like call for {sql}");
+            };
+            assert_eq!(name.as_str(), "regexp_like");
+            let ast::Expr::FunctionCall {
+                name: pattern_name,
+                args: pattern_args,
+                ..
+            } = args[1].as_ref()
+            else {
+                panic!("expected runtime pattern conversion for {sql}");
+            };
+            assert_eq!(pattern_name.as_str(), "pg_similar_to_regex");
+            assert_eq!(pattern_args.len(), expected_args);
         }
     }
 
@@ -6448,6 +6508,50 @@ mod tests {
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_regex_operators_preserve_case_and_newline_flags() {
+        let translator = PostgreSQLTranslator::new();
+        let parsed = crate::parse(
+            "SELECT 'Turso' ~ 'turso', 'Turso' !~ 'other', 'Turso' ~* 'turso', 'Turso' !~* 'other'",
+        )
+        .unwrap();
+        let translated = translator.translate(&parsed).unwrap();
+        let ast::Stmt::Select(select) = translated else {
+            panic!("Expected SELECT statement");
+        };
+        let ast::OneSelect::Select { columns, .. } = &select.body.select else {
+            panic!("Expected SELECT body");
+        };
+
+        for (column, (not, flags)) in columns.iter().zip([
+            (false, "'s'"),
+            (true, "'s'"),
+            (false, "'si'"),
+            (true, "'si'"),
+        ]) {
+            let ast::ResultColumn::Expr(expr, _) = column else {
+                panic!("Expected regex expression");
+            };
+            let expr = if not {
+                let ast::Expr::Unary(ast::UnaryOperator::Not, inner) = expr.as_ref() else {
+                    panic!("Expected negated regexp_like call");
+                };
+                inner.as_ref()
+            } else {
+                expr.as_ref()
+            };
+            let ast::Expr::FunctionCall { name, args, .. } = expr else {
+                panic!("Expected regexp_like call");
+            };
+            assert_eq!(name.as_str(), "regexp_like");
+            assert_eq!(args.len(), 3);
+            assert!(matches!(
+                args[2].as_ref(),
+                ast::Expr::Literal(ast::Literal::String(value)) if value == flags
+            ));
         }
     }
 

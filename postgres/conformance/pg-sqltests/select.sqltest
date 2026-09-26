@@ -19,6 +19,13 @@ expect {
     7
 }
 
+test select-case-insensitive-regex {
+    SELECT 'Turso' ~* 'turso', 'Turso' !~* 'turso';
+}
+expect {
+    1|0
+}
+
 test select-float-literal {
     SELECT 3.14;
 }

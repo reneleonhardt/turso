@@ -58,7 +58,7 @@ Basics not enumerated by the official feature matrix.
 | BEGIN / COMMIT / ROLLBACK | ✅ Supported | Isolation-level and READ ONLY/WRITE options accepted but ignored |
 | Casts (`expr::type`, CAST) | ✅ Supported | Also `int4(x)`-style cast functions |
 | Parameters (`$1`, `$2`, ...) | 🟡 Partial | Work through the extended wire protocol; text-format values only |
-| Operators: `\|\|`, `%`, bitwise, ILIKE, SIMILAR TO, `~`/`~*`/`!~`/`!~*`, IS [NOT] DISTINCT FROM, BETWEEN | ✅ Supported | Regex operators lower to REGEXP; case-insensitive variants treated as sensitive |
+| Operators: `\|\|`, `%`, bitwise, ILIKE, SIMILAR TO, `~`/`~*`/`!~`/`!~*`, IS [NOT] DISTINCT FROM, BETWEEN | 🟡 Partial | `~*` and `!~*` preserve case-insensitive matching; LIKE/ILIKE ESCAPE and dynamic SIMILAR TO patterns work. PostgreSQL POSIX regex syntax is incomplete. |
 | Dollar-quoted strings, escape strings (`E'...'`), bit/hex string literals | ✅ Supported | |
 | generate_series | ✅ Supported | In FROM and with joins; column aliases on the function (`AS g(x)`) do not resolve |
 | pg_catalog emulation | 🟡 Partial | See Backend section |
@@ -186,7 +186,7 @@ INTEGER. Unknown type names pass through as custom types.
 | ORDER BY NULLS FIRST/LAST | ✅ Supported | Honored in SELECT, window, and compound SELECT ORDER BY; rejected (matching SQLite) in CREATE INDEX |
 | range_agg range type aggregation function | ❌ Not supported | |
 | Recursive queries | 🟡 Partial | WITH RECURSIVE works with SQLite semantics (row-at-a-time recursive term, so e.g. DISTINCT in the recursive term over a multi-row anchor can differ from PG); SEARCH/CYCLE clauses are rejected |
-| regexp_count, regexp_instr, regexp_like | ❌ Not supported | Regex *operators* (`~`, `~*`, SIMILAR TO) work |
+| regexp_count, regexp_instr, regexp_like | 🟡 Partial | `regexp_like` supports common PostgreSQL flags; `regexp_count` and `regexp_instr` remain unsupported. |
 | Return OLD and NEW values from modified rows | ❌ Not supported | |
 | Row-wise comparison | ❌ Not supported | Row constructors `(a,b) < (c,d)` fail to translate |
 | SELECT ... FOR UPDATE/SHARE | ❌ Not supported | Accepted but silently ignored — no locking happens |
